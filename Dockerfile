@@ -31,12 +31,16 @@ RUN npm install -g hyperframes
 
 # Install chrome-headless-shell (required for HeadlessExperimental.beginFrame)
 # Regular chromium lacks this API and causes window.__hf to never be ready.
-# Force rebuild: updated timestamp
-RUN npx @puppeteer/browsers install chrome-headless-shell@stable --path /opt/chrome
+RUN npx @puppeteer/browsers install chrome@stable
 
-# Symlink the versioned binary to a stable path
-RUN ln -sf "$(find /opt/chrome -name 'chrome-headless-shell' -type f | head -1)" \
-    /usr/local/bin/chrome-headless-shell
+# Find and symlink the chrome-headless-shell binary
+RUN CHROME_PATH=$(find /root/.cache/puppeteer -name 'chrome-headless-shell' -type f 2>/dev/null | head -1) && \
+    if [ -n "$CHROME_PATH" ]; then \
+        ln -sf "$CHROME_PATH" /usr/local/bin/chrome-headless-shell; \
+    else \
+        echo "chrome-headless-shell not found"; \
+        exit 1; \
+    fi
 
 ENV HYPERFRAMES_BROWSER_PATH=/usr/local/bin/chrome-headless-shell
 
