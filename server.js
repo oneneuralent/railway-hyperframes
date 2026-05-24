@@ -114,8 +114,9 @@ app.post('/api/render/:project', async (req, res) => {
     const { quality = 'standard' } = req.body;
     const projectPath = path.join('./projects', project);
     
-    // Start rendering
-    const renderCmd = `npx hyperframes render --quality ${quality} --output renders/${project}.mp4`;
+    // Use local hyperframes binary (installed in container, not via npx)
+    const HYPERFRAMES_BIN = path.resolve('/app/node_modules/.bin/hyperframes');
+    const renderCmd = `${HYPERFRAMES_BIN} render --quality ${quality} --output renders/${project}.mp4`;
 
     const { stdout, stderr } = await execAsync(renderCmd, {
       cwd: projectPath,
