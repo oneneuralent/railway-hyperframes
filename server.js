@@ -114,12 +114,16 @@ app.post('/api/render/:project', async (req, res) => {
     const { quality = 'standard' } = req.body;
     const projectPath = path.join('./projects', project);
     
-    // Start rendering
+    // Start rendering with explicit browser path
     const renderCmd = `npx hyperframes render --quality ${quality} --output renders/${project}.mp4`;
     
     const { stdout, stderr } = await execAsync(renderCmd, {
       cwd: projectPath,
-      timeout: 300000 // 5 minute timeout
+      timeout: 300000, // 5 minute timeout
+      env: {
+        ...process.env,
+        HYPERFRAMES_BROWSER_PATH: process.env.HYPERFRAMES_BROWSER_PATH || '/usr/local/bin/chrome-headless-shell'
+      }
     });
     
     // Check if output file exists
