@@ -122,7 +122,7 @@ app.post('/api/render/:project', async (req, res) => {
       timeout: 300000, // 5 minute timeout
       env: {
         ...process.env,
-        HYPERFRAMES_BROWSER_PATH: process.env.HYPERFRAMES_BROWSER_PATH || '/usr/local/bin/chrome-headless-shell'
+        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/local/bin/chrome-headless-shell'
       }
     });
     
@@ -140,7 +140,9 @@ app.post('/api/render/:project', async (req, res) => {
       res.status(500).json({ error: 'Render failed - no output file', output: stdout, errors: stderr });
     }
   } catch (error) {
-    console.error('Render error:', error);
+    console.error('Render error:', error.message);
+    console.error('Render stdout:', error.stdout || '(none)');
+    console.error('Render stderr:', error.stderr || '(none)');
     res.status(500).json({ error: error.message, output: error.stdout || '', errors: error.stderr || '' });
   }
 });
