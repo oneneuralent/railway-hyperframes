@@ -114,16 +114,12 @@ app.post('/api/render/:project', async (req, res) => {
     const { quality = 'standard' } = req.body;
     const projectPath = path.join('./projects', project);
     
-    // Start rendering with explicit browser path
+    // Start rendering
     const renderCmd = `npx hyperframes render --quality ${quality} --output renders/${project}.mp4`;
-    
+
     const { stdout, stderr } = await execAsync(renderCmd, {
       cwd: projectPath,
-      timeout: 300000, // 5 minute timeout
-      env: {
-        ...process.env,
-        PUPPETEER_EXECUTABLE_PATH: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/local/bin/chrome-headless-shell'
-      }
+      timeout: 300000 // 5 minute timeout
     });
     
     // Check if output file exists
