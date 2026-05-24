@@ -1,9 +1,8 @@
 FROM node:22-slim
 
-# Install FFmpeg and Chrome dependencies
+# Install FFmpeg and shared library deps for chrome-headless-shell
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    chromium \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -23,14 +22,22 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Set Chrome to run headless
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROME_PATH=/usr/bin/chromium
-
-# Install HyperFrames CLI globally
+# Install HyperFrames CLI globally (includes @puppeteer/browsers)
 RUN npm install -g hyperframes
+
+# Install chrome-headless-shell (required for HeadlessExperimental.beginFrame)
+# Regular chromium lacks this API and causes window.__hf to never be ready.
+RUN npx @puppeteer/browsers install chrome-headless-shell@stable --path /opt/chrome
+
+# Symlink the versioned binary to a stable path
+RUN ln -sf "$(find /opt/chrome -name 'chrome-headless-shell' -type f | head -1)" \
+    /usr/local/bin/chrome-headless-shell
+
+ENV HYPERFRAMES_BROWSER_PATH=/usr/local/bin/chrome-headless-shell
 
 # Create app directory
 WORKDIR /app
