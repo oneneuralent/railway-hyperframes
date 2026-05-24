@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     ca-certificates \
     wget \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install HyperFrames CLI globally (includes @puppeteer/browsers)
