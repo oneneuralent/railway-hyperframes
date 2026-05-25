@@ -9,168 +9,173 @@ const execAsync = promisify(exec);
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: './uploads',
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  }
-});
-const upload = multer({ storage });
+// Local hyperframes binary — installed in the container by npm install
+const HF_BIN = path.resolve('/app/node_modules/.bin/hyperframes');
 
-// Ensure directories exist
+// Railway containers run as root / no-sandbox.
+// Pass these through to every exec so Chrome headless can start.
+const EXEC_ENV = {
+  ...process.env,
+  PUPPETEER_ARGS: '--no-sandbox --disable-setuid-sandbox',
+};
+
+// multer: store uploaded HTML in memory (no temp files to clean up)
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+// Ensure base directories exist
 async function ensureDirs() {
-  await fs.mkdir('./uploads', { recursive: true });
   await fs.mkdir('./projects', { recursive: true });
-  await fs.mkdir('./renders', { recursive: true });
 }
 ensureDirs();
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', ffmpeg: true, chrome: true });
+// ── Health check — actually verify the binary is present ────────────────────
+app.get('/health', async (req, res) => {
+  try {
+    await fs.access(HF_BIN);
+    res.json({ status: 'ok', binary: HF_BIN, node: process.version });
+  } catch {
+    res.status(500).json({ status: 'error', error: `hyperframes binary not found at ${HF_BIN}` });
+  }
 });
 
-// Create new project
+// ── Create project — just a directory, no CLI init needed ───────────────────
 app.post('/api/project', async (req, res) => {
   try {
     const { name } = req.body;
-    const projectPath = path.join('./projects', name);
-    
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const projectPath = path.resolve('./projects', name);
     await fs.mkdir(projectPath, { recursive: true });
-    
-    // Initialize HyperFrames project
-    await execAsync(`npx hyperframes init ${name} --non-interactive`, {
-      cwd: './projects'
-    });
-    
+    await fs.mkdir(path.join(projectPath, 'renders'), { recursive: true });
+
     res.json({ success: true, project: name });
   } catch (error) {
-    console.error('Project creation error:', error);
+    console.error('Project creation error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Upload composition HTML
+// ── Upload composition HTML ──────────────────────────────────────────────────
 app.post('/api/composition/:project', upload.single('html'), async (req, res) => {
   try {
     const { project } = req.params;
-    const projectPath = path.join('./projects', project);
-    
+    const projectPath = path.resolve('./projects', project);
+    await fs.mkdir(projectPath, { recursive: true });
+    await fs.mkdir(path.join(projectPath, 'renders'), { recursive: true });
+
+    let htmlContent = null;
     if (req.file) {
-      await fs.copyFile(req.file.path, path.join(projectPath, 'index.html'));
-      await fs.unlink(req.file.path);
+      htmlContent = req.file.buffer.toString('utf-8');
     } else if (req.body.html) {
-      await fs.writeFile(path.join(projectPath, 'index.html'), req.body.html);
+      htmlContent = req.body.html;
     }
-    
+
+    if (!htmlContent) return res.status(400).json({ error: 'html content is required (multipart field "html" or JSON body.html)' });
+
+    await fs.writeFile(path.join(projectPath, 'index.html'), htmlContent, 'utf-8');
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Upload asset file
-app.post('/api/asset/:project', upload.single('asset'), async (req, res) => {
-  try {
-    const { project } = req.params;
-    const assetsPath = path.join('./projects', project, 'assets');
-    await fs.mkdir(assetsPath, { recursive: true });
-    
-    if (req.file) {
-      const destPath = path.join(assetsPath, req.file.originalname);
-      await fs.copyFile(req.file.path, destPath);
-      await fs.unlink(req.file.path);
-    }
-    
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Lint composition
+// ── Lint composition ─────────────────────────────────────────────────────────
 app.post('/api/lint/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const projectPath = path.join('./projects', project);
-    
-    const { stdout, stderr } = await execAsync('npx hyperframes lint', {
-      cwd: projectPath
-    });
-    
-    res.json({ success: true, output: stdout, errors: stderr });
+    const projectPath = path.resolve('./projects', project);
+    const htmlFile = path.join(projectPath, 'index.html');
+
+    await fs.access(htmlFile);
+
+    const { stdout, stderr } = await execAsync(
+      `${HF_BIN} lint index.html`,
+      { cwd: projectPath, env: EXEC_ENV, timeout: 30000 }
+    );
+
+    res.json({ success: true, output: stdout, warnings: stderr });
   } catch (error) {
     res.json({ success: false, output: error.stdout || '', errors: error.stderr || error.message });
   }
 });
 
-// Render composition
+// ── Render composition ───────────────────────────────────────────────────────
 app.post('/api/render/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const { quality = 'standard' } = req.body;
-    const projectPath = path.join('./projects', project);
-    
-    // Use local hyperframes binary (installed in container, not via npx)
-    const HYPERFRAMES_BIN = path.resolve('/app/node_modules/.bin/hyperframes');
-    const renderCmd = `${HYPERFRAMES_BIN} render --quality ${quality} --output renders/${project}.mp4`;
+    const { quality = 'draft', width, height, fps } = req.body;
 
-    const { stdout, stderr } = await execAsync(renderCmd, {
+    const projectPath = path.resolve('./projects', project);
+    const rendersDir = path.join(projectPath, 'renders');
+    const outputFile = path.join(rendersDir, `${project}.mp4`);
+
+    // Ensure renders subdirectory exists
+    await fs.mkdir(rendersDir, { recursive: true });
+
+    // Build CLI command — input is index.html, output is renders/{project}.mp4
+    let cmd = `${HF_BIN} render index.html --quality ${quality} --output renders/${project}.mp4`;
+    if (width)  cmd += ` --width ${width}`;
+    if (height) cmd += ` --height ${height}`;
+    if (fps)    cmd += ` --fps ${fps}`;
+
+    const renderTimeout = quality === 'draft' ? 120000 : 300000;
+
+    console.log(`[render] cmd: ${cmd}`);
+    const { stdout, stderr } = await execAsync(cmd, {
       cwd: projectPath,
-      timeout: 300000 // 5 minute timeout
+      env: EXEC_ENV,
+      timeout: renderTimeout,
     });
-    
-    // Check if output file exists
-    const outputPath = path.join(projectPath, 'renders', `${project}.mp4`);
-    const exists = await fs.access(outputPath).then(() => true).catch(() => false);
-    
-    if (exists) {
-      res.json({ 
-        success: true, 
-        output: stdout,
-        videoUrl: `/api/download/${project}`
-      });
-    } else {
-      res.status(500).json({ error: 'Render failed - no output file', output: stdout, errors: stderr });
-    }
+
+    // Verify output file was produced
+    await fs.access(outputFile);
+
+    res.json({
+      success: true,
+      output: stdout,
+      download_url: `/api/download/${project}`,
+      videoUrl: `/api/download/${project}`,
+    });
   } catch (error) {
     console.error('Render error:', error.message);
-    console.error('Render stdout:', error.stdout || '(none)');
-    console.error('Render stderr:', error.stderr || '(none)');
-    res.status(500).json({ error: error.message, output: error.stdout || '', errors: error.stderr || '' });
+    console.error('stdout:', error.stdout || '(none)');
+    console.error('stderr:', error.stderr || '(none)');
+    res.status(500).json({
+      error: error.message,
+      output: error.stdout || '',
+      errors: error.stderr || '',
+    });
   }
 });
 
-// Download rendered video
+// ── Download rendered video ──────────────────────────────────────────────────
 app.get('/api/download/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const outputPath = path.join('./projects', project, 'renders', `${project}.mp4`);
-    
+    const outputPath = path.resolve('./projects', project, 'renders', `${project}.mp4`);
+
     await fs.access(outputPath);
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${project}.mp4"`);
     res.download(outputPath);
-  } catch (error) {
-    res.status(404).json({ error: 'Video not found' });
+  } catch {
+    res.status(404).json({ error: 'Video not found — render may still be in progress or failed' });
   }
 });
 
-// Delete project
+// ── Delete project ───────────────────────────────────────────────────────────
 app.delete('/api/project/:project', async (req, res) => {
   try {
     const { project } = req.params;
-    const projectPath = path.join('./projects', project);
-    
-    await fs.rm(projectPath, { recursive: true, force: true });
-    
+    await fs.rm(path.resolve('./projects', project), { recursive: true, force: true });
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`HyperFrames rendering API running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`HyperFrames rendering API on port ${PORT} | binary: ${HF_BIN}`);
 });
